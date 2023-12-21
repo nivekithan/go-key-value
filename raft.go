@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"encoding/binary"
 	"io"
+	"math/rand"
 	"os"
+	"sync"
+	"time"
 )
 
 type Entry struct {
@@ -18,11 +21,25 @@ type RaftServer struct {
 	votedFor    uint64
 	log         []Entry
 
+	state         RaftServerState
+	electionTimer electionTimer
+
 	fd *os.File
 }
 
-func NewRaftServer(fd *os.File) *RaftServer {
-	return &RaftServer{currentTerm: 0, votedFor: 0, log: nil, fd: fd}
+type Config struct {
+	heartbeatMs int
+}
+
+func NewRaftServer(fd *os.File, c Config) *RaftServer {
+	return &RaftServer{
+		currentTerm:   0,
+		votedFor:      0,
+		log:           []Entry{},
+		fd:            fd,
+		state:         RaftServerState{state: followerState},
+		electionTimer: electionTimer{heartbeatMs: c.heartbeatMs},
+	}
 }
 
 /**
@@ -168,4 +185,88 @@ func (r *RaftServer) restore() {
 	}
 
 	r.log = allEntries
+}
+
+func (r *RaftServer) Start() {
+	go func() {
+		state := r.state.Get()
+		r.electionTimer.reset()
+
+		for {
+			switch state {
+			case followerState:
+				r.electionTimer.waitForTimeout()
+				r.startElection()
+				// FIXME: Just for testing. Remove this once other parts of code is finished
+				return
+			}
+		}
+	}()
+}
+
+func (r *RaftServer) startElection() {
+	r.currentTerm++
+	r.state.Set(candidateState)
+
+	// TODO:
+	// Send RequestNote RPC's to all nodes
+}
+
+type PossibleServerState = string
+
+const (
+	leaderState    PossibleServerState = "leader"
+	followerState  PossibleServerState = "follower"
+	candidateState PossibleServerState = "candidate"
+)
+
+type RaftServerState struct {
+	mu    sync.Mutex
+	state PossibleServerState
+}
+
+func (r *RaftServerState) Get() PossibleServerState {
+	r.mu.Lock()
+
+	defer r.mu.Unlock()
+
+	return r.state
+}
+
+func (r *RaftServerState) Set(newState PossibleServerState) {
+	r.mu.Lock()
+
+	defer r.mu.Unlock()
+
+	r.state = newState
+}
+
+type electionTimer struct {
+	mu          sync.Mutex
+	timeoutAt   time.Time
+	heartbeatMs int
+}
+
+func (e *electionTimer) reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	interval := time.Duration((rand.Intn(e.heartbeatMs*2) + e.heartbeatMs))
+	timeout := time.Now().Add(interval * time.Millisecond)
+
+	e.timeoutAt = timeout
+}
+
+func (e *electionTimer) isPassed() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return time.Now().After(e.timeoutAt)
+}
+
+func (e *electionTimer) waitForTimeout() {
+	for {
+		if e.isPassed() {
+			return
+		}
+	}
 }

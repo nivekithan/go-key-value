@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +18,7 @@ func TestPersist(t *testing.T) {
 
 	require.NoError(t, err)
 
-	raftServer := NewRaftServer(tempFile)
+	raftServer := NewRaftServer(tempFile, Config{})
 
 	allEntry := []Entry{
 		{term: 0, command: []byte("Hello world")},
@@ -77,7 +78,7 @@ func testRestoringOnFirstBoot(t *testing.T) {
 
 	defer os.Remove(tempFile.Name())
 
-	raftServer := NewRaftServer(tempFile)
+	raftServer := NewRaftServer(tempFile, Config{})
 
 	raftServer.restore()
 
@@ -95,7 +96,7 @@ func testRestoringPersistedData(t *testing.T) {
 
 	defer os.Remove(fileName)
 
-	raftServer := NewRaftServer(tempFile)
+	raftServer := NewRaftServer(tempFile, Config{})
 
 	entries := []Entry{
 		{term: 0, command: []byte("First Log")},
@@ -115,7 +116,7 @@ func testRestoringPersistedData(t *testing.T) {
 
 	require.NoError(t, err)
 
-	raftServer = NewRaftServer(tempFile)
+	raftServer = NewRaftServer(tempFile, Config{})
 
 	raftServer.restore()
 
@@ -123,4 +124,40 @@ func testRestoringPersistedData(t *testing.T) {
 	require.Equal(t, uint64(2), raftServer.votedFor)
 
 	require.Equal(t, entries, raftServer.log)
+}
+
+func TestElectionTimer(t *testing.T) {
+	tempFile, err := os.CreateTemp("", "election-timer")
+
+	require.NoError(t, err)
+
+	defer os.Remove(tempFile.Name())
+
+	heartbeatMs := 20
+	raftServer := NewRaftServer(tempFile, Config{heartbeatMs: heartbeatMs})
+
+	t.Log("Raft Server started")
+	raftServer.Start()
+
+	timeout := time.After(time.Duration(heartbeatMs*2+heartbeatMs) * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Millisecond)
+
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if raftServer.state.Get() != leaderState {
+				continue
+			}
+		case <-timeout:
+			break
+		}
+
+		break
+
+	}
+
+	require.Equal(t, candidateState, raftServer.state.Get())
+	require.Equal(t, uint64(1), raftServer.currentTerm)
 }
