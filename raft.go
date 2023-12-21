@@ -40,6 +40,13 @@ func encodePage(currentTerm uint64, votedFor uint64) [PAGE_SIZE]byte {
 	return page
 }
 
+func decodePage(page [PAGE_SIZE]byte) (currentTerm uint64, votedFor uint64) {
+	currentTerm = binary.LittleEndian.Uint64(page[0:8])
+	votedFor = binary.LittleEndian.Uint64(page[8:16])
+
+	return currentTerm, votedFor
+}
+
 // Maximum size of a single command in log entry
 const ENTRY_COMMAND_SIZE = 1024
 
@@ -67,9 +74,22 @@ func encodeEntry(entry *Entry) [ENTRY_SIZE]byte {
 
 	binary.LittleEndian.PutUint64(encodedEntry[0:8], term)
 	binary.LittleEndian.PutUint64(encodedEntry[8:16], uint64(sizeOfCommand))
-	copy(encodedEntry[16:16+sizeOfCommand], entry.command)
+	copy(encodedEntry[ENTRY_HEADER_SIZE:ENTRY_HEADER_SIZE+sizeOfCommand], entry.command)
 
 	return encodedEntry
+}
+
+func decodeEntry(entry [ENTRY_SIZE]byte) Entry {
+	term := binary.LittleEndian.Uint64(entry[0:8])
+	sizeOfCommand := binary.LittleEndian.Uint64(entry[8:16])
+
+	command := make([]byte, sizeOfCommand)
+
+	copy(command, entry[ENTRY_HEADER_SIZE:ENTRY_HEADER_SIZE+sizeOfCommand])
+
+	entryStruct := Entry{term: term, command: command}
+
+	return entryStruct
 }
 
 func (r *RaftServer) persist(nNewEntries int) {
@@ -108,4 +128,44 @@ func (r *RaftServer) persist(nNewEntries int) {
 			panic(err)
 		}
 	}
+}
+
+func (r *RaftServer) restore() {
+	if _, err := r.fd.Seek(0, io.SeekStart); err != nil {
+		panic(err)
+	}
+
+	var page [PAGE_SIZE]byte
+
+	if _, err := r.fd.Read(page[:]); err != nil {
+		if err == io.EOF {
+			// The file is empty. Which means RaftServer has never persisted data to the disk
+			return
+		} else {
+			panic(err)
+		}
+	}
+
+	r.currentTerm, r.votedFor = decodePage(page)
+
+	br := bufio.NewReader(r.fd)
+
+	allEntries := []Entry{}
+	for {
+		var encodedEntry [ENTRY_SIZE]byte
+
+		if _, err := br.Read(encodedEntry[:]); err != nil {
+			if err == io.EOF {
+				// We have reached end of log entris
+				break
+			} else {
+				panic(err)
+			}
+		}
+
+		entry := decodeEntry(encodedEntry)
+		allEntries = append(allEntries, entry)
+	}
+
+	r.log = allEntries
 }
