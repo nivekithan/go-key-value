@@ -46,6 +46,7 @@ type RaftServer struct {
 var _ raft.RaftServiceServer = (*RaftServer)(nil)
 
 func (r *RaftServer) RequestVote(ctx context.Context, in *raft.RequestVoteArgs) (*raft.RequestVoteResult, error) {
+	r.electionTimer.reset(r.l)
 	r.l.Println("Responding to RequestVote")
 	lastLogIndex := r.getLastLogIndex()
 	lastLogTerm := r.getLastLogTerm()
@@ -81,6 +82,22 @@ func (r *RaftServer) RequestVote(ctx context.Context, in *raft.RequestVoteArgs) 
 	}
 
 	return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: true}, nil
+}
+
+func (r *RaftServer) AppendEntries(ctx context.Context, in *raft.AppendEntriesArgs) (*raft.AppendEntriesResult, error) {
+	r.l.Println("Responding to AppendEntries")
+	r.electionTimer.reset(r.l)
+
+	if in.Term > r.currentTerm {
+		r.currentTerm = in.Term
+	}
+
+	r.persist(0)
+	if in.Term < r.currentTerm {
+		return &raft.AppendEntriesResult{Term: r.currentTerm, Success: false}, nil
+	}
+
+	return &raft.AppendEntriesResult{Term: r.currentTerm, Success: true}, nil
 }
 
 type Config struct {
@@ -268,20 +285,55 @@ func (r *RaftServer) Start() {
 			r.l.Panic(err)
 		}
 	}()
+
 	go func() {
 		for {
 			state := r.state.Get()
-			r.electionTimer.reset()
+			r.electionTimer.reset(r.l)
 
 			switch state {
 			case followerState:
-				r.electionTimer.waitForTimeout(r.l)
+				r.electionTimer.waitForElectionTimeout(r.l)
 				r.startElection()
+			case leaderState:
+				r.electionTimer.waitForHeartbeatTimeout(r.l)
+				r.heartbeat()
 			}
 		}
 	}()
 }
 
+func (r *RaftServer) heartbeat() {
+
+	r.l.Println("Sending heartbeat")
+
+	var wg sync.WaitGroup
+	for _, member := range r.members {
+		wg.Add(1)
+		go func(leaderTerm uint64, leaderId uint64, address string) {
+			defer wg.Done()
+			conn, err := grpc.Dial(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+			if err != nil {
+				panic(err)
+			}
+
+			c := raft.NewRaftServiceClient(conn)
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+
+			defer cancel()
+			_, err = c.AppendEntries(ctx, &raft.AppendEntriesArgs{Term: leaderTerm, LeaderId: leaderId})
+
+			if err != nil {
+				panic(err)
+			}
+
+		}(r.currentTerm, r.id, member.Address)
+	}
+
+	wg.Wait()
+}
 func (r *RaftServer) startElection() {
 	r.l.Println("Staring election")
 	r.currentTerm++
@@ -309,6 +361,7 @@ func (r *RaftServer) startElection() {
 			client := raft.NewRaftServiceClient(conn)
 
 			// TODO: Proper value for time.Second
+
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 
 			defer cancel()
@@ -402,32 +455,57 @@ func (r *RaftServerState) Set(newState PossibleServerState) {
 }
 
 type electionTimer struct {
-	mu          sync.Mutex
-	timeoutAt   time.Time
-	heartbeatMs int
+	mu                 sync.Mutex
+	electionTimeoutAt  time.Time
+	heartbeatTimeoutAt time.Time
+	heartbeatMs        int
 }
 
-func (e *electionTimer) reset() {
+func (e *electionTimer) reset(l *log.Logger) {
+	l.Println("Reseting election timer")
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	interval := time.Duration((rand.Intn(e.heartbeatMs*2) + e.heartbeatMs))
-	timeout := time.Now().Add(interval * time.Millisecond)
+	electionInterval := time.Duration((rand.Intn(e.heartbeatMs*2) + e.heartbeatMs))
 
-	e.timeoutAt = timeout
+	electionTimeout := time.Now().Add(electionInterval * time.Millisecond)
+
+	e.electionTimeoutAt = electionTimeout
+
+	heartbeatInterval := time.Duration(e.heartbeatMs)
+	heartbeatTimeout := time.Now().Add(heartbeatInterval * time.Millisecond)
+
+	e.heartbeatTimeoutAt = heartbeatTimeout
 }
 
-func (e *electionTimer) isPassed() bool {
+func (e *electionTimer) isElectionPassed() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return time.Now().After(e.timeoutAt)
+	return time.Now().After(e.electionTimeoutAt)
 }
 
-func (e *electionTimer) waitForTimeout(l *log.Logger) {
+func (e *electionTimer) isHeartbeatPassed() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return time.Now().After(e.heartbeatTimeoutAt)
+}
+
+func (e *electionTimer) waitForElectionTimeout(l *log.Logger) {
 	l.Println("Waiting for timeout")
 	for {
-		if e.isPassed() {
+		if e.isElectionPassed() {
 			l.Println("Timeout has passed")
+			return
+		}
+	}
+}
+
+func (e *electionTimer) waitForHeartbeatTimeout(l *log.Logger) {
+	l.Println("Waiting for heartbeat timeout")
+	for {
+		if e.isHeartbeatPassed() {
+			l.Println("Heartbeat has passed")
 			return
 		}
 	}
