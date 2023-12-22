@@ -4,7 +4,6 @@ import (
 	"io"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -124,40 +123,4 @@ func testRestoringPersistedData(t *testing.T) {
 	require.Equal(t, uint64(2), raftServer.votedFor)
 
 	require.Equal(t, entries, raftServer.log)
-}
-
-func TestElectionTimer(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "election-timer")
-
-	require.NoError(t, err)
-
-	defer os.Remove(tempFile.Name())
-
-	heartbeatMs := 20
-	raftServer := NewRaftServer(tempFile, Config{heartbeatMs: heartbeatMs})
-
-	t.Log("Raft Server started")
-	raftServer.Start()
-
-	timeout := time.After(time.Duration(heartbeatMs*2+heartbeatMs) * time.Millisecond)
-	ticker := time.NewTicker(1 * time.Millisecond)
-
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if raftServer.state.Get() != leaderState {
-				continue
-			}
-		case <-timeout:
-			break
-		}
-
-		break
-
-	}
-
-	require.Equal(t, candidateState, raftServer.state.Get())
-	require.Equal(t, uint64(1), raftServer.currentTerm)
 }

@@ -2,12 +2,21 @@ package goraft
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"log"
 	"math/rand"
+	"net"
 	"os"
 	"sync"
 	"time"
+
+	"kv/api/raft"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Entry struct {
@@ -24,21 +33,77 @@ type RaftServer struct {
 	state         RaftServerState
 	electionTimer electionTimer
 
-	fd *os.File
+	members []Member
+	fd      *os.File
+	id      uint64
+
+	raft.UnimplementedRaftServiceServer
+	address string
+
+	l *log.Logger
+}
+
+var _ raft.RaftServiceServer = (*RaftServer)(nil)
+
+func (r *RaftServer) RequestVote(ctx context.Context, in *raft.RequestVoteArgs) (*raft.RequestVoteResult, error) {
+	r.l.Println("Responding to RequestVote")
+	lastLogIndex := r.getLastLogIndex()
+	lastLogTerm := r.getLastLogTerm()
+	logLength := len(r.log)
+
+	r.l.Printf("Current node: lastLogIndex %d, lastLogTerm %d, logLength %d, currentTerm %d, votedFor %d", lastLogIndex, lastLogTerm, logLength, r.currentTerm, r.votedFor)
+	r.l.Printf(
+		"Incoming node: lastLogIndex %d, lastLogTerm %d, logLength %d, currentTerm %d", in.LastLogIndex, in.LastLogTerm, in.LogLength, in.Term,
+	)
+
+	if r.votedFor != 0 && r.votedFor != in.CandidateId {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: false}, nil
+	}
+
+	if in.LogLength == 0 && logLength != 0 {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: false}, nil
+	}
+
+	if r.currentTerm > in.Term {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: false}, nil
+	}
+
+	if lastLogTerm > in.LastLogTerm {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: false}, nil
+	}
+
+	if lastLogTerm < in.LastLogTerm {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: true}, nil
+	}
+
+	if lastLogIndex > in.LastLogIndex {
+		return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: false}, nil
+	}
+
+	return &raft.RequestVoteResult{Term: r.currentTerm, VoteGranted: true}, nil
 }
 
 type Config struct {
-	heartbeatMs int
+	HeartbeatMs int
+	Member      []Member
+	Address     string
+	Id          uint64
 }
 
 func NewRaftServer(fd *os.File, c Config) *RaftServer {
+	logger := log.Default()
+	logger.SetPrefix(fmt.Sprintf("%d: ", c.Id))
 	return &RaftServer{
 		currentTerm:   0,
 		votedFor:      0,
 		log:           []Entry{},
 		fd:            fd,
 		state:         RaftServerState{state: followerState},
-		electionTimer: electionTimer{heartbeatMs: c.heartbeatMs},
+		electionTimer: electionTimer{heartbeatMs: c.HeartbeatMs},
+		members:       c.Member,
+		address:       c.Address,
+		id:            c.Id,
+		l:             logger,
 	}
 }
 
@@ -140,10 +205,9 @@ func (r *RaftServer) persist(nNewEntries int) {
 		if err := bw.Flush(); err != nil {
 			panic(err)
 		}
-
-		if err := r.fd.Sync(); err != nil {
-			panic(err)
-		}
+	}
+	if err := r.fd.Sync(); err != nil {
+		panic(err)
 	}
 }
 
@@ -156,7 +220,6 @@ func (r *RaftServer) restore() {
 
 	if _, err := r.fd.Read(page[:]); err != nil {
 		if err == io.EOF {
-			// The file is empty. Which means RaftServer has never persisted data to the disk
 			return
 		} else {
 			panic(err)
@@ -188,28 +251,125 @@ func (r *RaftServer) restore() {
 }
 
 func (r *RaftServer) Start() {
-	go func() {
-		state := r.state.Get()
-		r.electionTimer.reset()
+	r.l.Println("Starting Raft Server")
+	grpcServer := grpc.NewServer()
 
+	lis, err := net.Listen("tcp", r.address)
+
+	if err != nil {
+		r.l.Panic(err)
+	}
+
+	raft.RegisterRaftServiceServer(grpcServer, r)
+
+	go func() {
+		r.l.Printf("Staring grpc server at address %v", lis.Addr())
+		if err := grpcServer.Serve(lis); err != nil {
+			r.l.Panic(err)
+		}
+	}()
+	go func() {
 		for {
+			state := r.state.Get()
+			r.electionTimer.reset()
+
 			switch state {
 			case followerState:
-				r.electionTimer.waitForTimeout()
+				r.electionTimer.waitForTimeout(r.l)
 				r.startElection()
-				// FIXME: Just for testing. Remove this once other parts of code is finished
-				return
 			}
 		}
 	}()
 }
 
 func (r *RaftServer) startElection() {
+	r.l.Println("Staring election")
 	r.currentTerm++
+	// We vote for ourseveles
+	r.votedFor = r.id
+
+	r.persist(0)
 	r.state.Set(candidateState)
 
-	// TODO:
-	// Send RequestNote RPC's to all nodes
+	var wg sync.WaitGroup
+	ch := make(chan bool)
+
+	for _, member := range r.members {
+		wg.Add(1)
+		go func(term uint64, candidateId uint64, lastLogIndex uint64, lastLogTerm uint64, address string, logLength uint64) {
+
+			conn, err := grpc.Dial(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+			if err != nil {
+				panic(err)
+			}
+
+			defer conn.Close()
+
+			client := raft.NewRaftServiceClient(conn)
+
+			// TODO: Proper value for time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+
+			defer cancel()
+
+			res, err := client.RequestVote(ctx, &raft.RequestVoteArgs{Term: term, CandidateId: candidateId, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm, LogLength: logLength}, grpc.WaitForReady(true))
+
+			if err != nil {
+				panic(err)
+			}
+
+			ch <- res.VoteGranted
+			wg.Done()
+		}(r.currentTerm, r.id, r.getLastLogIndex(), r.getLastLogTerm(), member.Address, uint64(len(r.log)))
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	allPositiveVote := []bool{}
+
+	for vote := range ch {
+		if vote {
+			allPositiveVote = append(allPositiveVote, vote)
+		}
+	}
+
+	// We vote for ourselves
+	noOfVotes := len(allPositiveVote) + 1
+	r.l.Printf("No of votes: %d", noOfVotes)
+
+	// We include ourvelselves
+	totalNoMembers := len(r.members) + 1
+
+	isVoteGrantedToBecomeLeader := noOfVotes > (totalNoMembers / 2)
+	r.l.Printf("Is becoming leader %v", isVoteGrantedToBecomeLeader)
+
+	if isVoteGrantedToBecomeLeader {
+		// Transistion to become a leader
+		r.state.Set(leaderState)
+	} else {
+		// Transistion back to follower
+		r.state.Set(followerState)
+	}
+}
+
+func (r *RaftServer) getLastLogIndex() uint64 {
+	if len(r.log) == 0 {
+		return uint64(0)
+	}
+
+	return uint64(len(r.log) - 1)
+}
+
+func (r *RaftServer) getLastLogTerm() uint64 {
+	if len(r.log) == 0 {
+		return uint64(0)
+	}
+
+	return r.log[len(r.log)-1].term
 }
 
 type PossibleServerState = string
@@ -263,10 +423,17 @@ func (e *electionTimer) isPassed() bool {
 	return time.Now().After(e.timeoutAt)
 }
 
-func (e *electionTimer) waitForTimeout() {
+func (e *electionTimer) waitForTimeout(l *log.Logger) {
+	l.Println("Waiting for timeout")
 	for {
 		if e.isPassed() {
+			l.Println("Timeout has passed")
 			return
 		}
 	}
+}
+
+type Member struct {
+	Id      uint64
+	Address string
 }

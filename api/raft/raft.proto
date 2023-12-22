@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package raftService;
+
+option go_package = "api/raft";
+
+message RequestVoteArgs {
+  uint64 term = 1;
+  uint64 candidateId = 2;
+  uint64 lastLogIndex = 3;
+  uint64 lastLogTerm = 4;
+  uint64 logLength = 5;
+}
+
+message RequestVoteResult {
+  uint64 term = 1;
+  bool voteGranted = 2;
+}
+
+service RaftService {
+  rpc RequestVote(RequestVoteArgs) returns (RequestVoteResult);
+}
