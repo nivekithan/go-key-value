@@ -7,9 +7,13 @@ import (
 )
 
 type RaftServer struct {
+	// States
 	persistentState persistentState
 	memoryState     memoryState
-	electionTimer   electionTimer
+
+	// Timers
+	electionTimer  electionTimer
+	heartbeatTimer heartbeatTimer
 
 	eventCh chan raftEvents
 
@@ -34,6 +38,7 @@ func NewRaftServer(c Config) *RaftServer {
 		persistentState: newPersistent(),
 		memoryState:     newMemoryState(c.Address, c.Id, c.Members),
 		electionTimer:   newElectionTimeer(c.HeartBeatMs*2, logger),
+		heartbeatTimer:  newHeartbeatTimer(c.HeartBeatMs, logger),
 		eventCh:         ch,
 		l:               logger,
 	}
@@ -45,6 +50,7 @@ func (r *RaftServer) Start() {
 	go r.startGrpcServer()
 	go func() {
 		r.electionTimer.reset()
+		r.heartbeatTimer.reset()
 		for {
 			currentState := r.memoryState.state()
 
@@ -54,6 +60,11 @@ func (r *RaftServer) Start() {
 					r.l.Printf("Election timeout is passed")
 					r.eventCh <- raftEvents{kind: timeoutForElection}
 					r.electionTimer.reset()
+				}
+			case leaderState:
+				if r.heartbeatTimer.isHeartbeatTimeoutPassed() {
+					r.eventCh <- raftEvents{kind: timeoutForHeartbeat}
+					r.heartbeatTimer.reset()
 				}
 			}
 		}

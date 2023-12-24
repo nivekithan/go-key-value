@@ -33,6 +33,20 @@ func (r *RaftServer) RequestVote(ctx context.Context, in *raft.RequestVoteArgs) 
 	return &raft.RequestVoteResult{Term: r.persistentState.term(), VoteGranted: true}, nil
 }
 
+func (r *RaftServer) AppendEntries(ctx context.Context, in *raft.AppendEntriesArgs) (*raft.AppendEntriesResult, error) {
+	r.l.Printf("Responding to AppendEntries by %d", in.LeaderId)
+
+	r.updateTerm(in.Term)
+
+	if r.persistentState.term() > in.Term {
+		r.l.Println("Responding false since incomding term is lesser than current term")
+		return &raft.AppendEntriesResult{Term: r.persistentState.currentTerm, Success: false}, nil
+	}
+
+	r.electionTimer.reset()
+	return &raft.AppendEntriesResult{Term: r.persistentState.currentTerm, Success: true}, nil
+}
+
 func (r *RaftServer) updateTerm(incomingTerm uint64) {
 	if r.persistentState.term() < incomingTerm {
 		r.l.Printf(

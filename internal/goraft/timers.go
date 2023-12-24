@@ -38,3 +38,37 @@ func (e *electionTimer) isElectionTimeoutPassed() bool {
 
 	return isTimeoutPassed
 }
+
+type heartbeatTimer struct {
+	mu               sync.Mutex
+	heartbeartMs     uint64
+	heartbeatTimeout time.Time
+	l                *log.Logger
+}
+
+func newHeartbeatTimer(heartbeatMs uint64, l *log.Logger) heartbeatTimer {
+	return heartbeatTimer{heartbeartMs: heartbeatMs, l: l}
+}
+
+func (h *heartbeatTimer) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.l.Println("Reseting heartbeat timeout")
+	nextHeartbeatDuration := time.Duration(h.heartbeartMs)
+	timeout := time.Now().Add(nextHeartbeatDuration * time.Millisecond)
+
+	h.heartbeatTimeout = timeout
+}
+
+func (h *heartbeatTimer) isHeartbeatTimeoutPassed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	isTimeoutPassed := time.Now().After(h.heartbeatTimeout)
+	if isTimeoutPassed {
+		h.l.Println("heartbeat timeout passed")
+		return true
+	}
+	return false
+}
