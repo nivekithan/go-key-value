@@ -3,6 +3,9 @@ package goraft
 import (
 	"context"
 	"kv/api/raft"
+	"net"
+
+	"google.golang.org/grpc"
 )
 
 var _ raft.RaftServiceServer = (*RaftServer)(nil)
@@ -41,5 +44,26 @@ func (r *RaftServer) updateTerm(incomingTerm uint64) {
 		r.persistentState._votedFor = 0
 		// TODO: Add persistance
 		r.persistentState.mu.Unlock()
+
+		if r.memoryState.state() != followerState {
+			r.l.Println("Since RPC term is bigger than currentTerm transisting to follower")
+			r.eventCh <- raftEvents{kind: convertToFollower}
+		}
 	}
+}
+func (r *RaftServer) startGrpcServer() {
+	li, err := net.Listen("tcp", r.memoryState.address())
+
+	if err != nil {
+		r.l.Panic(err)
+	}
+
+	grpcServer := grpc.NewServer()
+
+	raft.RegisterRaftServiceServer(grpcServer, r)
+
+	if err := grpcServer.Serve(li); err != nil {
+		r.l.Panic(err)
+	}
+
 }
