@@ -2,12 +2,26 @@ package goraft
 
 import "sync"
 
-type persistent struct {
+type persistentState struct {
 	mu          sync.Mutex
 	currentTerm uint64
-	votedFor    uint64
+	_votedFor   uint64
 }
 
-func newPersistent() persistent {
-	return persistent{currentTerm: 0, votedFor: 0}
+func newPersistent() persistentState {
+	return persistentState{currentTerm: 0, _votedFor: 0}
+}
+
+func (p *persistentState) term() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.currentTerm
+}
+
+func (p *persistentState) votedFor() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p._votedFor
 }
