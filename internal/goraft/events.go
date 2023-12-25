@@ -61,8 +61,8 @@ func (r *RaftServer) respondToTimeoutForElectionEvent() {
 
 	select {
 
-	case electionRes := <-electionResChan:
-		if electionRes {
+	case isWonElection := <-electionResChan:
+		if isWonElection {
 			r.l.Printf("Transistion to leader")
 			r.memoryState.setState(leaderState)
 			go r.sendHeartbeat()

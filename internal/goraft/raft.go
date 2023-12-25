@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kv/api/raft"
 	"log"
+	"os"
 )
 
 type RaftServer struct {
@@ -31,9 +32,8 @@ type Config struct {
 
 func NewRaftServer(c Config) *RaftServer {
 	ch := make(chan raftEvents)
-	logger := log.Default()
+	logger := log.New(os.Stderr, fmt.Sprintf("%d: ", c.Id), log.LstdFlags)
 
-	logger.SetPrefix(fmt.Sprintf("%v: ", c.Id))
 	return &RaftServer{
 		persistentState: newPersistent(),
 		memoryState:     newMemoryState(c.Address, c.Id, c.Members),
