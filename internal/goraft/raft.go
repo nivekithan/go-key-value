@@ -1,10 +1,16 @@
 package goraft
 
 import (
+	"context"
 	"fmt"
 	"kv/api/raft"
 	"log"
 	"os"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type RaftServer struct {
@@ -69,4 +75,99 @@ func (r *RaftServer) Start() {
 			}
 		}
 	}()
+}
+
+func (r *RaftServer) AddEntry(command string) bool {
+	r.l.Println("Adding a entry")
+
+	if r.memoryState.state() != leaderState {
+		r.l.Println("Cannot add entry when raftNode is not leader")
+		return false
+	}
+
+	lastEntry, lastEntryIndex, isAvailabe := r.persistentState.getLastEntry()
+
+	logLength := func() uint64 {
+		if !isAvailabe {
+			return 0
+		}
+		return lastEntryIndex + 1
+	}()
+
+	r.persistentState.addEntry(Entry{term: r.persistentState.term(), command: command})
+
+	var wg sync.WaitGroup
+	resChan := make(chan bool)
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	for _, member := range *r.memoryState.Members() {
+		wg.Add(1)
+
+		go func(memberAddres string) {
+			res := r.sendAppendEntriesToMember(
+				memberAddres,
+				&raft.AppendEntriesArgs{
+					Term:         r.persistentState.term(),
+					LeaderId:     r.memoryState.id(),
+					PrevLogIndex: lastEntryIndex,
+					PrevLogTerm:  lastEntry.term,
+					LogLength:    logLength,
+					Entries: []*raft.Entry{
+						{Term: r.persistentState.term(), Command: []byte(command)},
+					},
+				},
+			)
+			resChan <- res
+			wg.Done()
+		}(member.Address)
+	}
+
+	// Including ourselves
+	allPositiveResults := 1
+
+	for res := range resChan {
+		if res {
+			allPositiveResults++
+		}
+
+		if allPositiveResults > len(*r.memoryState.Members())/2 {
+			// Commit the command
+			r.l.Println("Commiting log")
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *RaftServer) sendAppendEntriesToMember(memberAddress string, entries *raft.AppendEntriesArgs) bool {
+
+	r.l.Printf("Sending AppendEntries to Member: %v", memberAddress)
+
+	cc, err := grpc.Dial(memberAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+	if err != nil {
+		return r.sendAppendEntriesToMember(memberAddress, entries)
+	}
+
+	defer cc.Close()
+
+	client := raft.NewRaftServiceClient(cc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+
+	defer cancel()
+
+	res, err := client.AppendEntries(ctx, entries)
+
+	if err != nil {
+		return r.sendAppendEntriesToMember(memberAddress, entries)
+	}
+
+	r.updateTerm(res.Term)
+	return res.Success
 }

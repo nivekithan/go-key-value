@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	goraft "kv/internal/goraft"
+	"time"
 )
 
 func main() {
@@ -35,9 +36,16 @@ func main() {
 
 	raftServer.Start()
 
+	ticker := time.NewTicker(time.Duration(10) * time.Second)
+
+	for range ticker.C {
+		raftServer.AddEntry(fmt.Sprintf("Command for node %d", *id))
+		ticker.Stop()
+	}
+
 	ch := make(chan bool)
 
-	for _ = range ch {
+	for range ch {
 
 	}
 }

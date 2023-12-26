@@ -34,17 +34,27 @@ func (r *RaftServer) RequestVote(ctx context.Context, in *raft.RequestVoteArgs) 
 }
 
 func (r *RaftServer) AppendEntries(ctx context.Context, in *raft.AppendEntriesArgs) (*raft.AppendEntriesResult, error) {
-	r.l.Printf("Responding to AppendEntries by %d", in.LeaderId)
-
-	r.updateTerm(in.Term)
-
-	if r.persistentState.term() > in.Term {
-		r.l.Println("Responding false since incomding term is lesser than current term")
-		return &raft.AppendEntriesResult{Term: r.persistentState.currentTerm, Success: false}, nil
-	}
+	r.l.Printf("Responding to AppendEntries by %d with logLength %d", in.LeaderId, len(in.Entries))
 
 	r.electionTimer.reset()
-	return &raft.AppendEntriesResult{Term: r.persistentState.currentTerm, Success: true}, nil
+	r.updateTerm(in.Term)
+	isLogIndexMatching := r.checkLogIndexAndTerm(in)
+
+	if !isLogIndexMatching {
+		r.l.Println("Responding false since log index and term is not matching")
+		return &raft.AppendEntriesResult{Term: r.persistentState.term(), Success: false}, nil
+	}
+
+	if r.persistentState.term() > in.Term {
+		r.l.Println("Responding false since incoming term is lesser than current term")
+		return &raft.AppendEntriesResult{Term: r.persistentState.term(), Success: false}, nil
+	}
+
+	for _, entry := range in.Entries {
+		r.persistentState.addEntry(Entry{term: entry.Term, command: string(entry.Command)})
+	}
+
+	return &raft.AppendEntriesResult{Term: r.persistentState.term(), Success: true}, nil
 }
 
 func (r *RaftServer) updateTerm(incomingTerm uint64) {
@@ -65,6 +75,24 @@ func (r *RaftServer) updateTerm(incomingTerm uint64) {
 		}
 	}
 }
+
+func (r *RaftServer) checkLogIndexAndTerm(in *raft.AppendEntriesArgs) bool {
+	if in.LogLength == 0 {
+		// There are previous log length
+		return true
+	}
+
+	prevLogIndex := in.PrevLogIndex
+
+	entry, isEntryPresent := r.persistentState.getEntry(int(prevLogIndex))
+
+	if !isEntryPresent {
+		return false
+	}
+
+	return entry.term == in.Term
+}
+
 func (r *RaftServer) startGrpcServer() {
 	li, err := net.Listen("tcp", r.memoryState.address())
 

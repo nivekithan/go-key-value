@@ -18,7 +18,6 @@ func TestLeader(t *testing.T) {
 	timeout := time.NewTicker(time.Duration(heartbeatTimeout*10) * time.Millisecond)
 
 	for {
-
 		select {
 		case <-testTicker.C:
 			for _, raftServer := range raftCluster {
