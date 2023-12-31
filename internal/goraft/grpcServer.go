@@ -60,7 +60,8 @@ func (r *RaftServer) AppendEntries(ctx context.Context, in *raft.AppendEntriesAr
 func (r *RaftServer) updateTerm(incomingTerm uint64) {
 	if r.persistentState.term() < incomingTerm {
 		r.l.Printf(
-			"Incoming RPC term is bigger than currentTerm. Updating current term to %d and reseting votedFor", incomingTerm,
+			"Incoming RPC term is bigger than currentTerm. Updating current term to %d and reseting votedFor",
+			incomingTerm,
 		)
 
 		r.persistentState.mu.Lock()

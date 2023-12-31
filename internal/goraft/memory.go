@@ -16,8 +16,15 @@ type memoryState struct {
 	muState sync.Mutex
 
 	// All Cluster members of raft server
-	_members  []Member
+	_members  []internalMember
 	muMembers sync.Mutex
+}
+
+type internalMember struct {
+	address     string
+	nextIndex   uint64
+	matchIndex  uint64
+	stopChannel chan bool
 }
 
 type Member struct {
@@ -29,7 +36,13 @@ func newMemoryState(address string, id uint64, members []Member) memoryState {
 		panic("Address is not present")
 	}
 
-	return memoryState{_address: address, _id: id, _state: followerState, _members: members}
+	allInternalMembers := []internalMember{}
+
+	for _, member := range members {
+		allInternalMembers = append(allInternalMembers, internalMember{address: member.Address})
+	}
+
+	return memoryState{_address: address, _id: id, _state: followerState, _members: allInternalMembers}
 }
 
 func (a *memoryState) address() string {
@@ -68,9 +81,58 @@ func (a *memoryState) setState(state PossibleServerState) {
 	a._state = state
 }
 
-func (a *memoryState) Members() *[]Member {
+func (a *memoryState) Members() *[]internalMember {
 	a.muMembers.Lock()
 	defer a.muMembers.Unlock()
 
 	return &a._members
+}
+
+func (a *memoryState) getNextIndex(index int) uint64 {
+	a.muMembers.Lock()
+	defer a.muMembers.Unlock()
+
+	return a._members[index].nextIndex
+}
+
+func (a *memoryState) getMatchIndex(index int) uint64 {
+	a.muMembers.Lock()
+	defer a.muMembers.Unlock()
+
+	return a._members[index].matchIndex
+}
+
+func (a *memoryState) getStopChannel(index int) chan bool {
+	a.muAddress.Lock()
+	defer a.muAddress.Unlock()
+
+	return a._members[index].stopChannel
+}
+
+func (a *memoryState) setNextIndex(index int, nextIndex uint64) {
+	a.muMembers.Lock()
+	defer a.muMembers.Unlock()
+
+	a._members[index].nextIndex = nextIndex
+}
+
+func (a *memoryState) getMemberAddres(index int) string {
+	a.muMembers.Lock()
+	defer a.muAddress.Unlock()
+
+	return a._members[index].address
+}
+
+func (a *memoryState) setMatchIndex(index int, matchIndex uint64) {
+	a.muMembers.Lock()
+	defer a.muMembers.Unlock()
+
+	a._members[index].matchIndex = matchIndex
+}
+
+func (a *memoryState) setStopChannel(index int, stopChannel chan bool) {
+	a.muMembers.Lock()
+	defer a.muMembers.Unlock()
+
+	a._members[index].stopChannel = stopChannel
 }

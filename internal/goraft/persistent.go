@@ -62,3 +62,12 @@ func (p *persistentState) getLastEntry() (Entry, uint64, bool) {
 
 	return p.log[lenOfLog-1], uint64(lenOfLog - 1), true
 }
+
+func (p *persistentState) getLengthOfLog() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	lenOfLog := len(p.log)
+
+	return lenOfLog
+}

@@ -46,6 +46,7 @@ func (r *RaftServer) respondToConvertToFollower() {
 	}
 
 	r.l.Println("Converting to follower state")
+	r.stopSendingAppendEntriesRPC()
 	r.memoryState.setState(followerState)
 	r.electionTimer.reset()
 }
@@ -65,6 +66,7 @@ func (r *RaftServer) respondToTimeoutForElectionEvent() {
 		if isWonElection {
 			r.l.Printf("Transistion to leader")
 			r.memoryState.setState(leaderState)
+			r.initalizeSendingAppendEntriesRPC()
 			go r.sendHeartbeat()
 		} else {
 			r.l.Printf("Transition to follower. Since lost election")
@@ -106,9 +108,9 @@ func (r *RaftServer) startElection(electionResChan chan bool) {
 
 	for _, member := range *r.memoryState.Members() {
 		wg.Add(1)
-		go func(member Member, term uint64, candidateId uint64) {
+		go func(member internalMember, term uint64, candidateId uint64) {
 			cc, err := grpc.Dial(
-				member.Address,
+				member.address,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 			)
 
@@ -172,8 +174,8 @@ func (r *RaftServer) sendHeartbeat() {
 	for _, member := range *r.memoryState.Members() {
 
 		wg.Add(1)
-		go func(member Member, term uint64, id uint64) {
-			cc, err := grpc.Dial(member.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		go func(member internalMember, term uint64, id uint64) {
+			cc, err := grpc.Dial(member.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 
 			if err != nil {
 				r.l.Panic(err)

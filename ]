@@ -97,94 +97,15 @@ func (r *RaftServer) initalizeSendingAppendEntriesRPC() {
 
 		go func(memberIndex int) {
 			var (
-				memberAddress = r.memoryState.getMemberAddres(memberIndex)
+				nextIndexToSend      = r.memoryState.getNextIndex(memberIndex)
+				currentLengthOfIndex = uint64(r.persistentState.getLengthOfLog())
 			)
-			for {
-				stopChannel := r.memoryState.getStopChannel(memberIndex)
 
-				if len(stopChannel) != 0 {
-					// Message has been passed to stopChannel which means we have to stop this co routine
-					// by first reading the message from stopChannel and then stopping the execuation of
-					// go routine
-					_ = <-stopChannel
-					return
-				}
+			if currentLengthOfIndex <= nextIndexToSend {
 
-				nextIndexToSend := r.memoryState.getNextIndex(memberIndex)
-				currentLengthOfIndex := uint64(r.persistentState.getLengthOfLog())
-
-				if currentLengthOfIndex <= nextIndexToSend {
-					continue
-				}
-
-				preceddingEntry, isAvailabe := r.persistentState.getEntry(int(nextIndexToSend) - 1)
-
-				rpcArgs := raft.AppendEntriesArgs{Term: r.persistentState.term(), LeaderId: r.memoryState.id()}
-
-				if !isAvailabe {
-					rpcArgs.LogLength = 0
-				} else {
-					rpcArgs.PrevLogIndex = nextIndexToSend - 1
-					rpcArgs.PrevLogTerm = preceddingEntry.term
-					allEntries := []raft.Entry{}
-
-					r.persistentState.mu.Lock()
-					for _, log := range r.persistentState.log[nextIndexToSend:] {
-						allEntries = append(allEntries, raft.Entry{Term: log.term, Command: []byte(log.command)})
-					}
-					rpcArgs.LogLength = uint64(len(r.persistentState.log) - len(allEntries))
-					r.persistentState.mu.Unlock()
-				}
-
-				resOfRpc := r.sendAppendEntriesToMember(memberAddress, &rpcArgs)
-
-				isRpcFailed := !resOfRpc
-
-				if isRpcFailed {
-					if nextIndexToSend == 0 {
-						// If nextIndexToSend is 0, which means there is no prevIndex. The only reason
-						// follower will not accept the AppendEntriesRPC is because our term is lower
-						// than them. Which means we will be converting to follower state concurrently in
-						// another go routine. So we can safely exit this go routine
-						//
-						// To safely exit the go routine we will wait for a message in stopChannelRes
-						_ = <-stopChannel
-
-						return
-					}
-					// If the call fails due to log inconsistencies we will decrement the nextIndexToSend
-					// and try again
-					r.memoryState.setNextIndex(memberIndex, nextIndexToSend-1)
-					continue
-				} else {
-					newNextIndex := nextIndexToSend + uint64(len(rpcArgs.Entries))
-					r.memoryState.setNextIndex(memberIndex, newNextIndex)
-					r.memoryState.setMatchIndex(memberIndex, newNextIndex-1)
-				}
 			}
 		}(index)
 	}
-}
-
-func (r *RaftServer) stopSendingAppendEntriesRPC() {
-	var wg sync.WaitGroup
-	for index, member := range *r.memoryState.Members() {
-
-		stopChannel := member.stopChannel
-
-		if stopChannel == nil {
-			continue
-		}
-
-		wg.Add(1)
-		go func(stopChannel chan bool, index int) {
-			stopChannel <- true
-			r.memoryState.setStopChannel(index, nil)
-			wg.Done()
-		}(stopChannel, index)
-	}
-
-	wg.Wait()
 }
 
 func (r *RaftServer) AddEntry(command string) bool {
