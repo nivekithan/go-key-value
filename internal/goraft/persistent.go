@@ -10,8 +10,11 @@ type persistentState struct {
 }
 
 type Entry struct {
-	term    uint64
-	command string
+	term       uint64
+	command    string
+	resChan    chan []byte
+	acceptedBy int
+	isApplied  bool
 }
 
 func newPersistent() persistentState {

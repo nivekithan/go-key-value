@@ -156,14 +156,46 @@ func (r *RaftServer) initalizeSendingAppendEntriesRPC() {
 					// and try again
 					r.memoryState.setNextIndex(memberIndex, nextIndexToSend-1)
 					continue
-				} else {
-					newNextIndex := nextIndexToSend + uint64(len(rpcArgs.Entries))
-					r.memoryState.setNextIndex(memberIndex, newNextIndex)
-					r.memoryState.setMatchIndex(memberIndex, newNextIndex-1)
 				}
+
+				// Entries has been accepted by the server
+
+				// Update the nextIndex and matchIndex
+				newNextIndex := nextIndexToSend + uint64(len(rpcArgs.Entries))
+				r.memoryState.setNextIndex(memberIndex, newNextIndex)
+				r.memoryState.setMatchIndex(memberIndex, newNextIndex-1)
+
+				// Mark the entry has been accepted by the server
+				for i := nextIndexToSend; i < newNextIndex; i++ {
+					r.markEntryAsAccepedByMember(memberIndex, i)
+				}
+
 			}
 		}(index)
 	}
+}
+
+func (r *RaftServer) markEntryAsAccepedByMember(memberIndex int, entryIndex uint64) {
+	r.persistentState.mu.Lock()
+	defer r.persistentState.mu.Unlock()
+
+	entry := &r.persistentState.log[entryIndex]
+
+	entry.acceptedBy++
+
+	isAcceptedByMajority := entry.acceptedBy > len(*r.memoryState.Members())+1
+	if entry.isApplied || !isAcceptedByMajority {
+		// Either the entry has already been applied or we have to wait
+		// until the entry is accepted by majority servers before applying it to the statemachine
+		return
+	}
+
+	// Entry is accepted by majority of servers and its still not applied. Therefore we will
+	// apply the command to the statemachine
+	//
+	// TODO: Apply the command to the statemachine
+	entry.resChan <- []byte("Applied")
+	entry.isApplied = true
 }
 
 func (r *RaftServer) stopSendingAppendEntriesRPC() {
@@ -187,71 +219,25 @@ func (r *RaftServer) stopSendingAppendEntriesRPC() {
 	wg.Wait()
 }
 
-func (r *RaftServer) AddEntry(command string) bool {
+func (r *RaftServer) AddEntry(command string) ([]byte, bool) {
 	r.l.Println("Adding a entry")
 
 	if r.memoryState.state() != leaderState {
 		r.l.Println("Cannot add entry when raftNode is not leader")
-		return false
+		return []byte{}, false
 	}
 
-	lastEntry, lastEntryIndex, isAvailabe := r.persistentState.getLastEntry()
-	logLength := func() uint64 {
-		if !isAvailabe {
-			return 0
-		}
-		return lastEntryIndex + 1
-	}()
+	resChan := make(chan []byte)
+	// acceptedBy is 1. Since by adding this entry to our log. We are accepting it already
+	r.persistentState.addEntry(Entry{
+		term:       r.persistentState.term(),
+		command:    command,
+		resChan:    resChan,
+		acceptedBy: 1,
+		isApplied:  false,
+	})
 
-	r.persistentState.addEntry(Entry{term: r.persistentState.term(), command: command})
-
-	var wg sync.WaitGroup
-	resChan := make(chan bool)
-
-	for _, member := range *r.memoryState.Members() {
-		wg.Add(1)
-
-		go func(memberAddres string) {
-			res := r.sendAppendEntriesToMember(
-				memberAddres,
-				&raft.AppendEntriesArgs{
-					Term:         r.persistentState.term(),
-					LeaderId:     r.memoryState.id(),
-					PrevLogIndex: lastEntryIndex,
-					PrevLogTerm:  lastEntry.term,
-					LogLength:    logLength,
-					Entries: []*raft.Entry{
-						{Term: r.persistentState.term(), Command: []byte(command)},
-					},
-				},
-			)
-			resChan <- res
-			wg.Done()
-
-		}(member.address)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resChan)
-	}()
-
-	// Including ourselves
-	allPositiveResults := 1
-
-	for res := range resChan {
-		if res {
-			allPositiveResults++
-		}
-
-		if allPositiveResults > len(*r.memoryState.Members())/2 {
-			// Commit the command
-			r.l.Println("Commiting log")
-			return true
-		}
-	}
-
-	return false
+	return <-resChan, true
 }
 
 func (r *RaftServer) sendAppendEntriesToMember(memberAddress string, entries *raft.AppendEntriesArgs) bool {
